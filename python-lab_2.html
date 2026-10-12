@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Python Lab</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #1e1e1e; color: #eee;
+         display: flex; flex-direction: column; height: 100vh; }
+  header { padding: 8px 12px; background: #2d2d2d; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; flex: 1; }
+  button { background: #0e639c; color: #fff; border: 0; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  button:disabled { background: #444; cursor: default; }
+  button.secondary { background: #555; }
+  #status { font-size: 12px; color: #aaa; }
+  #warn { display: none; background: #8a4b00; padding: 6px 12px; font-size: 13px; }
+  main { flex: 1; display: flex; min-height: 0; }
+
+  /* Left: exercise tabs + editors with line numbers */
+  #left { flex: 1; display: flex; flex-direction: column; min-height: 0; border-right: 1px solid #333; }
+  #tabs { display: flex; background: #2d2d2d; border-bottom: 1px solid #333; }
+  .tab { background: transparent; color: #bbb; border: 0; border-radius: 0; padding: 8px 16px; font-size: 13px; }
+  .tab.active { background: #1e1e1e; color: #fff; border-bottom: 2px solid #0e639c; }
+
+  .editor-wrap { flex: 1; display: flex; min-height: 0; }
+  .editor-wrap[hidden] { display: none; }
+  .gutter { background: #252526; color: #858585; font-family: Consolas, "Courier New", monospace;
+            font-size: 15px; line-height: 20px; padding: 12px 10px 12px 12px; text-align: right;
+            overflow: hidden; user-select: none; white-space: pre; border-right: 1px solid #333; }
+  .editor { flex: 1; background: #1e1e1e; color: #d4d4d4; border: 0; padding: 12px;
+            font-family: Consolas, "Courier New", monospace; font-size: 15px; line-height: 20px;
+            resize: none; outline: none; tab-size: 4; white-space: pre; overflow: auto; }
+
+  /* Right: output */
+  #output { flex: 1; margin: 0; padding: 12px; background: #111; font-family: Consolas, "Courier New", monospace;
+            font-size: 14px; white-space: pre-wrap; overflow: auto; min-width: 0; }
+  .err { color: #ff6b6b; }
+
+  @media (max-width: 700px) {
+    main { flex-direction: column; }
+    #left { border-right: 0; border-bottom: 1px solid #333; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Python Lab</h1>
+  <span id="status">Loading Python...</span>
+  <button id="run" disabled>Run (Ctrl+Enter)</button>
+  <button class="secondary" id="clear">Clear output</button>
+  <button class="secondary" id="dlCode">Download code</button>
+</header>
+<div id="warn"></div>
+<main>
+  <div id="left">
+    <div id="tabs">
+      <button class="tab active" data-index="0">Exercise 1</button>
+      <button class="tab" data-index="1">Exercise 2</button>
+      <button class="tab" data-index="2">Exercise 3</button>
+    </div>
+    <div class="editor-wrap" data-index="0">
+      <div class="gutter"></div>
+      <textarea class="editor" data-index="0" wrap="off" spellcheck="false" placeholder="Exercise 1: write your code here..."></textarea>
+    </div>
+    <div class="editor-wrap" data-index="1" hidden>
+      <div class="gutter"></div>
+      <textarea class="editor" data-index="1" wrap="off" spellcheck="false" placeholder="Exercise 2: write your code here..."></textarea>
+    </div>
+    <div class="editor-wrap" data-index="2" hidden>
+      <div class="gutter"></div>
+      <textarea class="editor" data-index="2" wrap="off" spellcheck="false" placeholder="Exercise 3: write your code here..."></textarea>
+    </div>
+  </div>
+  <pre id="output"></pre>
+</main>
+
+<script>
+const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js";
+const LOG_KEY = "pylab-activity-log";
+const CODE_KEY_PREFIX = "pylab-code-ex";
+
+const output = document.getElementById("output");
+const statusEl = document.getElementById("status");
+const runBtn = document.getElementById("run");
+const warn = document.getElementById("warn");
+const editors = [...document.querySelectorAll("textarea.editor")];
+const wraps = [...document.querySelectorAll(".editor-wrap")];
+const tabs = [...document.querySelectorAll(".tab")];
+
+let pyodide = null;
+let activeIndex = 0;
+
+function activeEditor() { return editors[activeIndex]; }
+
+// ---------- Output ----------
+function appendOut(text, isError = false) {
+  const span = document.createElement("span");
+  if (isError) span.className = "err";
+  span.textContent = text + (text.endsWith("\n") ? "" : "\n");
+  output.appendChild(span);
+  output.scrollTop = output.scrollHeight;
+}
+
+// ---------- Activity log (kept on this computer, warning shown to student) ----------
+function getLog() {
+  try { return JSON.parse(localStorage.getItem(LOG_KEY) || "[]"); } catch (e) { return []; }
+}
+function logEvent(type) {
+  const log = getLog();
+  log.push({ time: new Date().toISOString(), event: type });
+  try { localStorage.setItem(LOG_KEY, JSON.stringify(log)); } catch (e) {}
+}
+function refreshWarning() {
+  const n = getLog().filter(e => e.event === "left_page").length;
+  if (n > 0) {
+    warn.style.display = "block";
+    warn.textContent = `Leaving this page has been recorded (${n} time${n === 1 ? "" : "s"}).`;
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) logEvent("left_page");
+  refreshWarning();
+});
+window.addEventListener("blur", () => logEvent("focus_lost"));
+
+// ---------- Download all code (one .txt file) ----------
+document.getElementById("dlCode").addEventListener("click", () => {
+  const parts = editors.map((ed, i) =>
+    `===== Exercise ${i + 1} =====\n${ed.value}\n`
+  );
+  const blob = new Blob([parts.join("\n")], { type: "text/plain" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "exercises.txt";
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+// ---------- Line numbers ----------
+function updateGutter(i) {
+  const ed = editors[i];
+  const gutter = wraps[i].querySelector(".gutter");
+  const count = ed.value.split("\n").length;
+  let nums = "";
+  for (let n = 1; n <= count; n++) nums += n + "\n";
+  gutter.textContent = nums.trimEnd();
+  gutter.scrollTop = ed.scrollTop;
+}
+
+// ---------- Editors ----------
+editors.forEach((ed, i) => {
+  ed.value = localStorage.getItem(CODE_KEY_PREFIX + (i + 1)) || "";
+  updateGutter(i);
+
+  ed.addEventListener("input", () => {
+    try { localStorage.setItem(CODE_KEY_PREFIX + (i + 1), ed.value); } catch (e) {}
+    updateGutter(i);
+  });
+  ed.addEventListener("scroll", () => {
+    wraps[i].querySelector(".gutter").scrollTop = ed.scrollTop;
+  });
+  ed.addEventListener("keydown", e => {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const s = ed.selectionStart;
+      ed.value = ed.value.slice(0, s) + "    " + ed.value.slice(ed.selectionEnd);
+      ed.selectionStart = ed.selectionEnd = s + 4;
+      ed.dispatchEvent(new Event("input"));
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      e.preventDefault();
+      runCode();
+    }
+  });
+});
+
+// ---------- Tabs ----------
+tabs.forEach(tab => {
+  tab.addEventListener("click", () => {
+    activeIndex = Number(tab.dataset.index);
+    tabs.forEach((t, i) => t.classList.toggle("active", i === activeIndex));
+    wraps.forEach((w, i) => { w.hidden = i !== activeIndex; });
+    activeEditor().focus();
+  });
+});
+
+// ---------- Run (runs the code in the active tab) ----------
+async function runCode() {
+  if (!pyodide) return;
+  output.textContent = "";
+  runBtn.disabled = true;
+  statusEl.textContent = "Running...";
+  const ns = pyodide.globals.get("dict")();   // fresh namespace each run
+  try {
+    await pyodide.runPythonAsync(activeEditor().value, { globals: ns });
+  } catch (err) {
+    appendOut(String(err.message || err), true);   // real Python traceback
+  } finally {
+    ns.destroy();
+    runBtn.disabled = false;
+    statusEl.textContent = "Ready";
+  }
+}
+runBtn.addEventListener("click", runCode);
+document.getElementById("clear").addEventListener("click", () => { output.textContent = ""; });
+
+// ---------- Load Python ----------
+const script = document.createElement("script");
+script.src = PYODIDE_URL;
+script.onerror = () => { statusEl.textContent = "Could not load Python. Check the internet connection."; };
+script.onload = async () => {
+  try {
+    pyodide = await loadPyodide({
+      stdout: t => appendOut(t),
+      stderr: t => appendOut(t, true),
+      stdin: () => window.prompt("Your program is asking for input:") ?? ""
+    });
+    // No help system in this lab
+    await pyodide.runPythonAsync(
+      'import builtins\nbuiltins.help = lambda *a, **k: print("help() is disabled in this lab.")'
+    );
+    statusEl.textContent = "Ready";
+    runBtn.disabled = false;
+  } catch (err) {
+    statusEl.textContent = "Python failed to start: " + err;
+  }
+};
+document.body.appendChild(script);
+</script>
+</body>
+</html>
